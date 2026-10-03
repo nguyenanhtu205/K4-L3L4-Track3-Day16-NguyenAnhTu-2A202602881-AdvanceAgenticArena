@@ -79,16 +79,41 @@ class Critic(Middleware):
     name = "critic"
 
     def after_agent(self, ctx, report):
-        # TODO (§2): khoảng 10-25 dòng.
-        #  1. Lấy report["claims"]; nếu rỗng hoặc không phải list thì thôi.
-        #  2. Với mỗi claim: nếu claim["text"] có trong ctx.observed_text
-        #     -> giữ nguyên (KHÔNG sửa chữ).
-        #  3. Nếu không: thử tách câu ghép (trường hợp (c) ở docstring).
-        #     Tách được -> giữ cả hai nửa, mỗi nửa gắn doc_id của tài liệu
-        #     thật sự chứa nó, và đặt report["abstain"] = True.
-        #  4. Không tách được -> đây là bịa: bỏ claim đi.
-        #  5. Nếu không còn claim nào: report["abstain"] = True,
-        #     claims = [], citations = [], và viết lại "answer" nói rõ là
-        #     không đủ căn cứ.
-        #  6. Cập nhật report["citations"] cho khớp với claims còn lại.
-        return report  # <- mặc định KHÔNG LÀM GÌ: agent vẫn chạy được
+        claims = report.get("claims")
+        if not isinstance(claims, list):
+            return report
+        observed = ctx.observed_text
+        kept = []
+        split_claim = False
+        for claim in claims:
+            text = claim.get("text") if isinstance(claim, dict) else None
+            if isinstance(text, str) and text in observed:
+                kept.append(claim)
+                continue
+            if not isinstance(text, str):
+                continue
+            parts = text.split(" và ", 1)
+            if len(parts) != 2 or not all(part in observed for part in parts):
+                continue
+            sources = [
+                next(
+                    (
+                        doc
+                        for doc in ctx.corpus.docs
+                        if doc.body in observed
+                        and any(part in line for line in doc.body.splitlines())
+                    ),
+                    None,
+                )
+                for part in parts
+            ]
+            if None not in sources and sources[0].doc_id != sources[1].doc_id:
+                kept.extend([{**claim, "text": part, "doc_id": doc.doc_id} for part, doc in zip(parts, sources)])
+                split_claim = True
+        report["claims"] = kept
+        report["citations"] = sorted({claim["doc_id"] for claim in kept if isinstance(claim.get("doc_id"), str)})
+        if split_claim or not kept:
+            report["abstain"] = True
+        if not kept:
+            report["answer"] = "Không đủ căn cứ để trả lời một cách đáng tin cậy."
+        return report
